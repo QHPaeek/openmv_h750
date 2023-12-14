@@ -14,7 +14,7 @@
 #include "pendsv.h"
 #include "extint.h"
 #include "spi.h"
-
+#include "py/objlist.h"
 #include "py_lcd_cec.h"
 #include "py_lcd_touch.h"
 #include "py_helper.h"
@@ -35,9 +35,7 @@ static int lcd_height = 0;
 
 static enum {
     LCD_NONE,
-    LCD_SHIELD_1_8,
-    LCD_SHIELD_0_96,
-    LCD_SHIELD_1_8a,
+    LCD_SHIELD,
     LCD_DISPLAY,
     LCD_DISPLAY_WITH_HDMI,
     LCD_DISPLAY_ONLY_HDMI
@@ -97,19 +95,12 @@ static void spi_config_deinit()
     HAL_GPIO_DeInit(OMV_SPI_LCD_MOSI_PORT, OMV_SPI_LCD_MOSI_PIN);
     HAL_GPIO_DeInit(OMV_SPI_LCD_SCLK_PORT, OMV_SPI_LCD_SCLK_PIN);
 
-    #if define OMV_SPI_LCD_RST_PIN
     HAL_GPIO_DeInit(OMV_SPI_LCD_RST_PORT, OMV_SPI_LCD_RST_PIN);
-    #endif
-
     HAL_GPIO_DeInit(OMV_SPI_LCD_RS_PORT, OMV_SPI_LCD_RS_PIN);
     HAL_GPIO_DeInit(OMV_SPI_LCD_CS_PORT, OMV_SPI_LCD_CS_PIN);
 
     ///////////////////////////////////////////////////////////////////////
 }
-
-#ifdef OMV_SPI_LCD_BL_PIN
-    static void spi_lcd_set_backlight(int intensity);
-#endif
 
 static void spi_lcd_callback(SPI_HandleTypeDef *hspi);
 
@@ -120,7 +111,7 @@ static void spi_config_init(int w, int h, int refresh_rate, bool triple_buffer, 
     OMV_SPI_LCD_CONTROLLER->spi->Init.NSS = SPI_NSS_SOFT;
     OMV_SPI_LCD_CONTROLLER->spi->Init.TIMode = SPI_TIMODE_DISABLE;
     OMV_SPI_LCD_CONTROLLER->spi->Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-    spi_set_params(OMV_SPI_LCD_CONTROLLER, 0xffffffff, w * h * refresh_rate * 16 * 2, 0, 0, 8, 0);
+    spi_set_params(OMV_SPI_LCD_CONTROLLER, 0xffffffff, w * h * refresh_rate * 16, 0, 0, 8, 0);
     spi_init(OMV_SPI_LCD_CONTROLLER, true);
     HAL_SPI_RegisterCallback(OMV_SPI_LCD_CONTROLLER->spi, HAL_SPI_TX_COMPLETE_CB_ID, spi_lcd_callback);
 
@@ -129,7 +120,7 @@ static void spi_config_init(int w, int h, int refresh_rate, bool triple_buffer, 
     GPIO_InitTypeDef GPIO_InitStructure;
     GPIO_InitStructure.Pull      = GPIO_NOPULL;
     GPIO_InitStructure.Mode      = GPIO_MODE_AF_PP;
-    GPIO_InitStructure.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStructure.Speed     = GPIO_SPEED_FREQ_MEDIUM;
 
     GPIO_InitStructure.Alternate = OMV_SPI_LCD_MOSI_ALT;
     GPIO_InitStructure.Pin       = OMV_SPI_LCD_MOSI_PIN;
@@ -141,14 +132,11 @@ static void spi_config_init(int w, int h, int refresh_rate, bool triple_buffer, 
 
     GPIO_InitStructure.Mode      = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStructure.Speed     = GPIO_SPEED_FREQ_LOW;
-    
-    #if define OMV_SPI_LCD_RST_PIN
+
     GPIO_InitStructure.Pin       = OMV_SPI_LCD_RST_PIN;
     HAL_GPIO_Init(OMV_SPI_LCD_RST_PORT, &GPIO_InitStructure);
     OMV_SPI_LCD_RST_OFF();
-    #endif
-    
-    GPIO_InitStructure.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+
     GPIO_InitStructure.Pin       = OMV_SPI_LCD_RS_PIN;
     HAL_GPIO_Init(OMV_SPI_LCD_RS_PORT, &GPIO_InitStructure);
     OMV_SPI_LCD_RS_OFF();
@@ -156,27 +144,14 @@ static void spi_config_init(int w, int h, int refresh_rate, bool triple_buffer, 
     GPIO_InitStructure.Pin       = OMV_SPI_LCD_CS_PIN;
     HAL_GPIO_Init(OMV_SPI_LCD_CS_PORT, &GPIO_InitStructure);
     OMV_SPI_LCD_CS_HIGH();
-#ifdef OMV_SPI_LCD_BL_PIN
-    spi_lcd_set_backlight(1);
-#endif
+
     /////////////////////////////////////////////////////////////////////
 
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x01}, 1, HAL_MAX_DELAY); // software reset
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
     OMV_SPI_LCD_RST_ON();
-    HAL_Delay(120);
+    HAL_Delay(100);
 
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x01}, 1, HAL_MAX_DELAY); // software reset
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_RST_ON();
     OMV_SPI_LCD_RST_OFF();
-    HAL_Delay(120);
+    HAL_Delay(100);
 
     OMV_SPI_LCD_RS_ON();
     OMV_SPI_LCD_CS_LOW();
@@ -187,98 +162,11 @@ static void spi_config_init(int w, int h, int refresh_rate, bool triple_buffer, 
 
     OMV_SPI_LCD_RS_ON();
     OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xB1}, 1, HAL_MAX_DELAY); // B1
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x01, 0x2C, 0x2D}, 3, HAL_MAX_DELAY);
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xB2}, 1, HAL_MAX_DELAY); // B2
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xB3}, 1, HAL_MAX_DELAY); // B3
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x01, 0x2c, 0x2d, 0x01, 0x2c, 0x2d}, 6, HAL_MAX_DELAY);
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xB4}, 1, HAL_MAX_DELAY); // B4
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x07}, 1, HAL_MAX_DELAY);
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xC0}, 1, HAL_MAX_DELAY); // C0
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xA2, 0x02, 0x84}, 3, HAL_MAX_DELAY);
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xC1}, 1, HAL_MAX_DELAY); // C1
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xC5}, 1, HAL_MAX_DELAY);
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xC2}, 1, HAL_MAX_DELAY); // C2
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x0A, 0x00}, 2, HAL_MAX_DELAY);
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xC3}, 1, HAL_MAX_DELAY); // C3
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x8A, 0x2A}, 2, HAL_MAX_DELAY);
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xC4}, 1, HAL_MAX_DELAY); // C4
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x8A, 0xEE}, 2, HAL_MAX_DELAY);
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xC5}, 1, HAL_MAX_DELAY); // C5
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x0E}, 1, HAL_MAX_DELAY);
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
     HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x36}, 1, HAL_MAX_DELAY); // memory data access control
     OMV_SPI_LCD_CS_HIGH();
     OMV_SPI_LCD_RS_OFF();
     OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {bgr ? 0xA8 : 0xC0}, 1, HAL_MAX_DELAY); // argument
+    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {bgr ? 0xC8 : 0xC0}, 1, HAL_MAX_DELAY); // argument
     OMV_SPI_LCD_CS_HIGH();
 
     OMV_SPI_LCD_RS_ON();
@@ -288,81 +176,6 @@ static void spi_config_init(int w, int h, int refresh_rate, bool triple_buffer, 
     OMV_SPI_LCD_RS_OFF();
     OMV_SPI_LCD_CS_LOW();
     HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x05}, 1, HAL_MAX_DELAY); // argument
-    OMV_SPI_LCD_CS_HIGH();
-
-    // set Window
-    uint8_t xPos = 0;
-    uint8_t yPos = 0;
-
-    switch (lcd_type)
-    {
-    case LCD_SHIELD_0_96:
-        OMV_SPI_LCD_RS_ON();
-        OMV_SPI_LCD_CS_LOW();
-        HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x21}, 1, HAL_MAX_DELAY); // choose panel
-        OMV_SPI_LCD_CS_HIGH();
-        OMV_SPI_LCD_RS_OFF();
-        xPos = 1;
-        yPos = 26;
-        break;
-    case LCD_SHIELD_1_8a:
-    case LCD_SHIELD_1_8:
-        OMV_SPI_LCD_RS_ON();
-        OMV_SPI_LCD_CS_LOW();
-        HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x20}, 1, HAL_MAX_DELAY); // choose panel
-        OMV_SPI_LCD_CS_HIGH();
-        OMV_SPI_LCD_RS_OFF();
-        if(lcd_type == LCD_SHIELD_1_8)
-        {
-            xPos = 0;
-            yPos = 0;
-        }
-        else
-        {
-            xPos = 2;
-            yPos = 1;
-        }
-        break;
-    default:
-        break;
-    }
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x2A}, 1, HAL_MAX_DELAY); // column
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0, xPos&0xFF, 0, xPos+w-1}, 4, HAL_MAX_DELAY); // argument
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x2B}, 1, HAL_MAX_DELAY); // row
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0, yPos&0xFF, 0, yPos+h-1}, 4, HAL_MAX_DELAY); // argument
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xE0}, 1, HAL_MAX_DELAY); // GMCTRP
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x02, 0x1c, 0x07, 0x12, 0x37, 0x32, 0x29, 0x2d, 0x29,
-                                0x25, 0x2b, 0x39, 0x00, 0x01, 0x03, 0x10}, 16, HAL_MAX_DELAY); // argument
-    OMV_SPI_LCD_CS_HIGH();
-
-    OMV_SPI_LCD_RS_ON();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0xE1}, 1, HAL_MAX_DELAY); // GMCTRN
-    OMV_SPI_LCD_CS_HIGH();
-    OMV_SPI_LCD_RS_OFF();
-    OMV_SPI_LCD_CS_LOW();
-    HAL_SPI_Transmit(OMV_SPI_LCD_CONTROLLER->spi, (uint8_t []) {0x03, 0x1d, 0x07, 0x06, 0x2e, 0x2c, 0x29, 0x2d, 0x2e,
-                                0x2e, 0x37, 0x3f, 0x00, 0x00, 0x02, 0x10}, 16, HAL_MAX_DELAY); // argument
     OMV_SPI_LCD_CS_HIGH();
 
     if (triple_buffer) {
@@ -426,7 +239,7 @@ static const uint8_t memory_write[] = {0x2C};
 
 static void spi_lcd_callback(SPI_HandleTypeDef *hspi)
 {
-    if (lcd_type == LCD_SHIELD_1_8 || lcd_type == LCD_SHIELD_1_8a || lcd_type == LCD_SHIELD_0_96) {
+    if (lcd_type == LCD_SHIELD) {
         static uint16_t *spi_tx_cb_state_memory_write_addr = NULL;
         static size_t spi_tx_cb_state_memory_write_count = 0;
         static bool spi_tx_cb_state_memory_write_first = false;
@@ -686,16 +499,16 @@ static void spi_lcd_set_backlight(int intensity)
 #else
     if ((lcd_intensity < 1) && (1 <= intensity)) {
 #endif
+        OMV_SPI_LCD_BL_ON();
+        HAL_GPIO_DeInit(OMV_SPI_LCD_BL_PORT, OMV_SPI_LCD_BL_PIN);
+    } else if ((0 < lcd_intensity) && (intensity <= 0)) {
         GPIO_InitTypeDef GPIO_InitStructure;
         GPIO_InitStructure.Pull = GPIO_NOPULL;
         GPIO_InitStructure.Mode = GPIO_MODE_OUTPUT_PP;
         GPIO_InitStructure.Speed = GPIO_SPEED_FREQ_LOW;
         GPIO_InitStructure.Pin = OMV_SPI_LCD_BL_PIN;
         HAL_GPIO_Init(OMV_SPI_LCD_BL_PORT, &GPIO_InitStructure);
-        OMV_SPI_LCD_BL_ON();
-    } else if ((0 < lcd_intensity) && (intensity <= 0)) {
         OMV_SPI_LCD_BL_OFF();
-        HAL_GPIO_DeInit(OMV_SPI_LCD_BL_PORT, OMV_SPI_LCD_BL_PIN);
     }
 
 #ifdef OMV_SPI_LCD_BL_DAC
@@ -1485,12 +1298,10 @@ STATIC mp_obj_t py_lcd_deinit()
 {
     switch (lcd_type) {
         #ifdef OMV_SPI_LCD_CONTROLLER
-        case LCD_SHIELD_0_96:
-        case LCD_SHIELD_1_8a:
-        case LCD_SHIELD_1_8: {
+        case LCD_SHIELD: {
             spi_config_deinit();
             #ifdef OMV_SPI_LCD_BL_PIN
-            spi_lcd_set_backlight(0); // back to default state
+            spi_lcd_set_backlight(255); // back to default state
             #endif
             break;
         }
@@ -1536,12 +1347,11 @@ STATIC mp_obj_t py_lcd_init(uint n_args, const mp_obj_t *args, mp_map_t *kw_args
 {
     py_lcd_deinit();
 
-    int type = py_helper_keyword_int(n_args, args, 0, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_type), LCD_SHIELD_0_96);
+    int type = py_helper_keyword_int(n_args, args, 0, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_type), LCD_SHIELD);
 
     switch (type) {
         #ifdef OMV_SPI_LCD_CONTROLLER
-        case LCD_SHIELD_1_8a: 
-        case LCD_SHIELD_1_8: {
+        case LCD_SHIELD: {
             int w = py_helper_keyword_int(n_args, args, 1, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_width), 128);
             if ((w <= 0) || (32767 < w)) mp_raise_msg(&mp_type_ValueError, MP_ERROR_TEXT("Invalid Width!"));
             int h = py_helper_keyword_int(n_args, args, 2, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_height), 160);
@@ -1550,41 +1360,17 @@ STATIC mp_obj_t py_lcd_init(uint n_args, const mp_obj_t *args, mp_map_t *kw_args
             if ((refresh_rate < 30) || (120 < refresh_rate)) mp_raise_msg(&mp_type_ValueError, MP_ERROR_TEXT("Invalid Refresh Rate!"));
             bool triple_buffer = py_helper_keyword_int(n_args, args, 4, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_triple_buffer), false);
             bool bgr = py_helper_keyword_int(n_args, args, 5, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_bgr), false);
-            lcd_width = w;
-            lcd_height = h;
-            lcd_type = type;
-            lcd_triple_buffer = triple_buffer;
-            lcd_bgr = bgr;
-            lcd_resolution = 0;
-            lcd_refresh = refresh_rate;
-
             spi_config_init(w, h, refresh_rate, triple_buffer, bgr);
             #ifdef OMV_SPI_LCD_BL_PIN
             spi_lcd_set_backlight(255); // to on state
             #endif
-            break;
-        }
-        case LCD_SHIELD_0_96: {
-            int w = py_helper_keyword_int(n_args, args, 1, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_width), 160);
-            if ((w <= 0) || (32767 < w)) mp_raise_msg(&mp_type_ValueError, MP_ERROR_TEXT("Invalid Width!"));
-            int h = py_helper_keyword_int(n_args, args, 2, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_height), 80);
-            if ((h <= 0) || (32767 < h)) mp_raise_msg(&mp_type_ValueError, MP_ERROR_TEXT("Invalid Height!"));
-            int refresh_rate = py_helper_keyword_int(n_args, args, 3, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_refresh), 60);
-            if ((refresh_rate < 30) || (120 < refresh_rate)) mp_raise_msg(&mp_type_ValueError, MP_ERROR_TEXT("Invalid Refresh Rate!"));
-            bool triple_buffer = py_helper_keyword_int(n_args, args, 4, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_triple_buffer), false);
-            bool bgr = py_helper_keyword_int(n_args, args, 5, kw_args, MP_OBJ_NEW_QSTR(MP_QSTR_bgr), true);
             lcd_width = w;
             lcd_height = h;
-            lcd_type = LCD_SHIELD_0_96;
+            lcd_type = LCD_SHIELD;
             lcd_triple_buffer = triple_buffer;
             lcd_bgr = bgr;
             lcd_resolution = 0;
             lcd_refresh = refresh_rate;
-
-            spi_config_init(w, h, refresh_rate, triple_buffer, bgr);
-            #ifdef OMV_SPI_LCD_BL_PIN
-            spi_lcd_set_backlight(255); // to on state
-            #endif
             break;
         }
         #endif
@@ -1665,7 +1451,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_0(py_lcd_bgr_obj, py_lcd_bgr);
 
 STATIC mp_obj_t py_lcd_framesize()
 {
-    if ((lcd_type == LCD_NONE) || (lcd_type == LCD_SHIELD_0_96) || (lcd_type == LCD_SHIELD_1_8) || (lcd_type == LCD_SHIELD_1_8a)) return mp_const_none;
+    if ((lcd_type == LCD_NONE) || (lcd_type == LCD_SHIELD)) return mp_const_none;
     return mp_obj_new_int(lcd_resolution);
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(py_lcd_framesize_obj, py_lcd_framesize);
@@ -1684,9 +1470,7 @@ STATIC mp_obj_t py_lcd_set_backlight(mp_obj_t intensity_obj)
 
     switch (lcd_type) {
         #if defined(OMV_SPI_LCD_CONTROLLER) && defined(OMV_SPI_LCD_BL_PIN)
-        case LCD_SHIELD_0_96:
-        case LCD_SHIELD_1_8a:
-        case LCD_SHIELD_1_8: {
+        case LCD_SHIELD: {
             spi_lcd_set_backlight(intensity);
             break;
         }
@@ -1885,9 +1669,7 @@ STATIC mp_obj_t py_lcd_display(uint n_args, const mp_obj_t *args, mp_map_t *kw_a
 
     switch (lcd_type) {
         #ifdef OMV_SPI_LCD_CONTROLLER
-        case LCD_SHIELD_0_96:
-        case LCD_SHIELD_1_8a:
-        case LCD_SHIELD_1_8: {
+        case LCD_SHIELD: {
             fb_alloc_mark();
             spi_lcd_display(arg_img, arg_x_off, arg_y_off, arg_x_scale, arg_y_scale, &arg_roi,
                             arg_rgb_channel, arg_alpha, color_palette, alpha_palette, hint);
@@ -1917,9 +1699,7 @@ STATIC mp_obj_t py_lcd_clear(uint n_args, const mp_obj_t *args)
 {
     switch (lcd_type) {
         #ifdef OMV_SPI_LCD_CONTROLLER
-        case LCD_SHIELD_0_96:
-        case LCD_SHIELD_1_8a:
-        case LCD_SHIELD_1_8: {
+        case LCD_SHIELD: {
             if (n_args && mp_obj_get_int(*args)) { // turns the display off (may not be black)
                 spi_lcd_clear();
             } else { // sets the display to black (not off)
@@ -1957,9 +1737,7 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(py_lcd_clear_obj, 0, 1, py_lcd_clear)
 STATIC const mp_rom_map_elem_t globals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__),                MP_OBJ_NEW_QSTR(MP_QSTR_lcd)                    },
     { MP_ROM_QSTR(MP_QSTR_LCD_NONE),                MP_ROM_INT(LCD_NONE)                            },
-    { MP_ROM_QSTR(MP_QSTR_LCD_SHIELD_1_8),          MP_ROM_INT(LCD_SHIELD_1_8)                      },
-    { MP_ROM_QSTR(MP_QSTR_LCD_SHIELD_1_8a),         MP_ROM_INT(LCD_SHIELD_1_8a)                      },
-    { MP_ROM_QSTR(MP_QSTR_LCD_SHIELD_0_96),         MP_ROM_INT(LCD_SHIELD_0_96)                     },
+    { MP_ROM_QSTR(MP_QSTR_LCD_SHIELD),              MP_ROM_INT(LCD_SHIELD)                          },
 #ifdef OMV_DVI_PRESENT
     { MP_ROM_QSTR(MP_QSTR_LCD_DISPLAY),             MP_ROM_INT(LCD_DISPLAY)                         },
     { MP_ROM_QSTR(MP_QSTR_LCD_DISPLAY_WITH_HDMI),   MP_ROM_INT(LCD_DISPLAY_WITH_HDMI)               },
